@@ -33,6 +33,7 @@
 #include "components/icons/morning.h"
 #include "components/icons/night.h"
 #include "components/icons/streak.h"
+#include "components/icons/streakIcons.h"
 #include "fontIds.h"
 
 namespace {
@@ -138,20 +139,31 @@ const uint8_t* readerTypeIcon(const GlobalReadingStats& globalStats) {
   }
 }
 
-void formatStreakStat(const GlobalReadingStats& globalStats, char* buf, const size_t len) {
+// Writes the streak label and returns the icon to draw beside it: the streak
+// icon normally, the frozen icon while a missed day can still be restored.
+const uint8_t* formatStreakStat(const GlobalReadingStats& globalStats, char* buf, const size_t len) {
   if (len == 0) {
-    return;
+    return StreakIcon;
   }
 
   ReadingStatsDateTime today;
-  const uint16_t streak =
-      getCurrentLocalReadingStatsDateTime(today) ? globalStats.currentReadingStreak(&today.date) : 0;
-  if (streak == 0) {
+  const ReadingStreakStatus streak =
+      getCurrentLocalReadingStatsDateTime(today) ? globalStats.readingStreakStatus(&today.date) : ReadingStreakStatus{};
+  if (streak.state == ReadingStreakState::None) {
     snprintf(buf, len, "%s", tr(STR_STATS_NO_STREAK));
-    return;
+    return StreakIcon;
   }
 
-  snprintf(buf, len, tr(STR_STATS_DAY_STREAK_FORMAT), static_cast<unsigned>(streak));
+  if (streak.state != ReadingStreakState::Frozen) {
+    snprintf(buf, len, tr(STR_STATS_DAY_STREAK_FORMAT), static_cast<unsigned>(streak.days));
+    return StreakIcon;
+  }
+
+  // Restore progress leads so it survives truncation in narrow footers.
+  snprintf(buf, len, "%u/%um (%u %s)", static_cast<unsigned>(streak.freezeSeconds / 60),
+           static_cast<unsigned>(READING_STREAK_RESTORE_SECONDS / 60), static_cast<unsigned>(streak.days),
+           streak.days == 1 ? tr(STR_STATS_DAY) : tr(STR_STATS_DAYS));
+  return icon_streak_frozen_24_bits;
 }
 
 Rect coverImageRectForFrame(const Rect& coverRect);
@@ -203,7 +215,7 @@ void drawStatsOverlay(const GfxRenderer& renderer, const GlobalReadingStats& glo
   }
 
   char streakBuf[48];
-  formatStreakStat(globalStats, streakBuf, sizeof(streakBuf));
+  const uint8_t* streakIcon = formatStreakStat(globalStats, streakBuf, sizeof(streakBuf));
   const char* readerLabel = readerTypeLabel(globalStats);
 
   const int readerRegionTop = 0;
@@ -213,7 +225,7 @@ void drawStatsOverlay(const GfxRenderer& renderer, const GlobalReadingStats& glo
 
   const int streakRegionTop = progressLabelBottomY(renderer, coverRect, progressPercent);
   const int streakRegionBottom = renderer.getScreenHeight();
-  drawCenteredStatsRow(renderer, StreakIcon, kStatsFooterStreakIconSize, streakBuf, streakRegionTop, streakRegionBottom,
+  drawCenteredStatsRow(renderer, streakIcon, kStatsFooterStreakIconSize, streakBuf, streakRegionTop, streakRegionBottom,
                        inverted);
 }
 

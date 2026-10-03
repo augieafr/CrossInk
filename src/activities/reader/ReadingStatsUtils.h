@@ -8,6 +8,10 @@ constexpr size_t READING_TIME_BUCKET_COUNT = 4;
 constexpr size_t READING_DAY_OF_WEEK_COUNT = 7;
 constexpr size_t READING_HISTORY_DAYS = 730;
 constexpr size_t READING_HISTORY_BYTES = (READING_HISTORY_DAYS + 7) / 8;
+// Reading time needed on the day after a missed day to restore a frozen streak.
+constexpr uint32_t READING_STREAK_RESTORE_SECONDS = 2 * 3600;
+// Minimum days between two streak restores.
+constexpr uint32_t READING_STREAK_RESTORE_COOLDOWN_DAYS = 7;
 
 enum class ReadingTimeBucket : uint8_t { Morning = 0, Afternoon, Evening, Night };
 
@@ -27,6 +31,23 @@ struct ReadingStatsDateTime {
   uint8_t second = 0;
 
   bool isValid() const;
+};
+
+// Streak freeze bookkeeping kept alongside the reading history bitmap. A missed
+// day stays unset in the bitmap; restored gaps are only counted here.
+struct ReadingStreakFreeze {
+  uint16_t bridgedDays = 0;     // Restored single-day gaps inside the run ending at the history anchor
+  uint32_t lastRestoreDay = 0;  // Day index of the most recent restore (0 = never)
+  uint32_t freezeDay = 0;       // Day index whose reading time counts toward a restore (0 = none)
+  uint16_t freezeSeconds = 0;   // Reading seconds accumulated on freezeDay
+};
+
+enum class ReadingStreakState : uint8_t { None, Active, Frozen };
+
+struct ReadingStreakStatus {
+  ReadingStreakState state = ReadingStreakState::None;
+  uint16_t days = 0;           // Streak length; while frozen, the streak that a restore would keep
+  uint16_t freezeSeconds = 0;  // Progress toward READING_STREAK_RESTORE_SECONDS while frozen
 };
 
 bool isLeapYear(uint16_t year);
@@ -51,9 +72,14 @@ void recordReadingSpanIntoBuckets(std::array<uint32_t, READING_TIME_BUCKET_COUNT
                                   const ReadingStatsDateTime& localStart, uint32_t seconds);
 void markReadingHistoryDay(uint32_t& anchorDay, std::array<uint8_t, READING_HISTORY_BYTES>& bits, uint32_t dayIndex);
 void recordReadingSpanIntoHistory(uint32_t& anchorDay, std::array<uint8_t, READING_HISTORY_BYTES>& bits,
-                                  const ReadingStatsDateTime& localStart, uint32_t seconds);
+                                  ReadingStreakFreeze& freeze, const ReadingStatsDateTime& localStart,
+                                  uint32_t seconds);
+// Merges another device's history into the target. The target keeps its own
+// freeze state; the source device's restores are not carried over.
 void mergeReadingHistory(uint32_t& targetAnchorDay, std::array<uint8_t, READING_HISTORY_BYTES>& targetBits,
-                         uint32_t sourceAnchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& sourceBits);
+                         ReadingStreakFreeze& targetFreeze, uint32_t sourceAnchorDay,
+                         const std::array<uint8_t, READING_HISTORY_BYTES>& sourceBits);
 uint16_t computeReadingHistoryLongestStreak(uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits);
-uint16_t computeReadingHistoryCurrentStreak(uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits,
-                                            const ReadingStatsDate* today);
+ReadingStreakStatus computeReadingStreakStatus(uint32_t anchorDay,
+                                               const std::array<uint8_t, READING_HISTORY_BYTES>& bits,
+                                               const ReadingStreakFreeze& freeze, const ReadingStatsDate* today);

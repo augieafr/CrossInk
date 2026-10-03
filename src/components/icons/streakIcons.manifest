@@ -1,0 +1,5 @@
+# Manifest for src/components/icons/streakIcons.h — regenerate with:
+#   python3 scripts/generate_icons.py --library tabler \
+#     --manifest src/components/icons/streakIcons.manifest \
+#     --sizes 24 --out src/components/icons/streakIcons.h
+streak-frozen = snowflake

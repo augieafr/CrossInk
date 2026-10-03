@@ -280,6 +280,17 @@ Tracked stats include:
 
 Recent CrossInk versions expanded this into a larger stats system, including synced totals, richer X3 stats screens, reading-streak and time charts, editable stat dates, idle-time filtering, reset controls, and all-time stats backup options.
 
+### Streak Freeze
+
+Missing one day no longer ends a reading streak straight away. The next day the streak is frozen: the streak icon becomes a snowflake and shows progress such as `25/120m`.
+
+- Read 2 hours in total on the frozen day to restore the streak. The missed day does not add to the count; the day you restore on does.
+- Read less than 2 hours and the old streak ends at midnight, with a new streak starting from that day.
+- Missing two days in a row ends the streak.
+- A restore is available once every 7 days. A second missed day inside that window ends the streak as before.
+
+Only reading on this reader counts toward the 2 hours, and reading time is added when you leave the book.
+
 **Note**: Date-related stats require a device with a real-time clock (RTC) module. The X4 does not have an RTC module, therefore will not have as detailed stats as the X3.
 
 Reading stats can also be used as a sleep screen, including the Minimal Stats sleep screen on supported builds.

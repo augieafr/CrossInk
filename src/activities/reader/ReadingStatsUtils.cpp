@@ -42,6 +42,121 @@ void shiftHistoryOlder(std::array<uint8_t, READING_HISTORY_BYTES>& bits, const s
   bits = shifted;
 }
 
+bool isHistoryEmpty(const uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits) {
+  return anchorDay == 0 && !isBitSet(bits, 0);
+}
+
+struct StreakRun {
+  uint16_t days = 0;        // Read days in the run
+  size_t oldestOffset = 0;  // Bit offset of the oldest read day in the run
+  uint16_t unsetDays = 0;   // Bridged gaps crossed by the run
+};
+
+// Walks back from startOffset counting read days. A single missed day is
+// crossed without being counted, up to maxBridges times; restored gaps are
+// always the most recent ones in a run, so no positions need to be stored.
+StreakRun walkStreakRun(const std::array<uint8_t, READING_HISTORY_BYTES>& bits, const size_t startOffset,
+                        const uint16_t maxBridges) {
+  StreakRun run;
+  run.oldestOffset = startOffset;
+  for (size_t bitIndex = startOffset; bitIndex < READING_HISTORY_DAYS; ++bitIndex) {
+    if (isBitSet(bits, bitIndex)) {
+      run.days++;
+      run.oldestOffset = bitIndex;
+      continue;
+    }
+    if (run.unsetDays >= maxBridges || !isBitSet(bits, bitIndex + 1)) {
+      break;
+    }
+    run.unsetDays++;
+  }
+  return run;
+}
+
+// The anchor day is a frozen day: the day before it was missed and the restore
+// target has not been reached yet.
+bool isFreezePending(const uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits,
+                     const ReadingStreakFreeze& freeze) {
+  return freeze.freezeDay != 0 && freeze.freezeDay == anchorDay && freeze.freezeDay != freeze.lastRestoreDay &&
+         !isBitSet(bits, 1) && isBitSet(bits, 2);
+}
+
+bool canRestoreStreakOn(const ReadingStreakFreeze& freeze, const uint32_t dayIndex) {
+  if (freeze.lastRestoreDay == 0) {
+    return true;
+  }
+  return dayIndex > freeze.lastRestoreDay && dayIndex - freeze.lastRestoreDay >= READING_STREAK_RESTORE_COOLDOWN_DAYS;
+}
+
+// Offset of the newest day in the run that freeze.bridgedDays describes. While
+// a freeze is pending, that run sits behind the missed day.
+size_t bridgedRunStartOffset(const uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits,
+                             const ReadingStreakFreeze& freeze) {
+  return isFreezePending(anchorDay, bits, freeze) ? 2 : 0;
+}
+
+// Updates freeze state for reading on dayIndex. Must run before the day is
+// marked in the history, while anchorDay still names the previous read day.
+void advanceStreakFreeze(const uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits,
+                         ReadingStreakFreeze& freeze, const uint32_t dayIndex) {
+  if (isHistoryEmpty(anchorDay, bits) || dayIndex == anchorDay) {
+    return;
+  }
+
+  if (dayIndex < anchorDay) {
+    // Reading recorded for an older day. If it fills a restored gap, that gap
+    // no longer needs a bridge.
+    const size_t offset = anchorDay - dayIndex;
+    if (freeze.bridgedDays == 0 || offset >= READING_HISTORY_DAYS || isBitSet(bits, offset)) {
+      return;
+    }
+    const size_t startOffset = bridgedRunStartOffset(anchorDay, bits, freeze);
+    const StreakRun run = walkStreakRun(bits, startOffset, freeze.bridgedDays);
+    if (offset > startOffset && offset < run.oldestOffset) {
+      freeze.bridgedDays--;
+    }
+    return;
+  }
+
+  // Reading on a newer day settles a freeze still pending on the old anchor:
+  // it was not restored, so the run restarts on that day.
+  if (isFreezePending(anchorDay, bits, freeze)) {
+    freeze.bridgedDays = 0;
+  }
+  freeze.freezeDay = 0;
+  freeze.freezeSeconds = 0;
+
+  const uint32_t missedDays = dayIndex - anchorDay - 1;
+  if (missedDays == 0) {
+    return;
+  }
+  if (missedDays == 1 && canRestoreStreakOn(freeze, dayIndex)) {
+    freeze.freezeDay = dayIndex;
+    return;
+  }
+  freeze.bridgedDays = 0;
+}
+
+// Counts reading on a frozen day toward the restore target. Must run after the
+// day is marked in the history.
+void accumulateStreakFreeze(const uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits,
+                            ReadingStreakFreeze& freeze, const uint32_t dayIndex, const uint32_t seconds) {
+  if (dayIndex != anchorDay || !isFreezePending(anchorDay, bits, freeze)) {
+    return;
+  }
+
+  const uint32_t remaining = READING_STREAK_RESTORE_SECONDS - freeze.freezeSeconds;
+  if (seconds < remaining) {
+    freeze.freezeSeconds = static_cast<uint16_t>(freeze.freezeSeconds + seconds);
+    return;
+  }
+  freeze.freezeSeconds = static_cast<uint16_t>(READING_STREAK_RESTORE_SECONDS);
+  freeze.lastRestoreDay = dayIndex;
+  if (freeze.bridgedDays < UINT16_MAX) {
+    freeze.bridgedDays++;
+  }
+}
+
 uint32_t secondsUntilNextBucketBoundary(const ReadingStatsDateTime& dt) {
   const uint32_t currentSecondOfDay =
       static_cast<uint32_t>(dt.hour) * 3600u + static_cast<uint32_t>(dt.minute) * 60u + dt.second;
@@ -373,7 +488,8 @@ void markReadingHistoryDay(uint32_t& anchorDay, std::array<uint8_t, READING_HIST
 }
 
 void recordReadingSpanIntoHistory(uint32_t& anchorDay, std::array<uint8_t, READING_HISTORY_BYTES>& bits,
-                                  const ReadingStatsDateTime& localStart, const uint32_t seconds) {
+                                  ReadingStreakFreeze& freeze, const ReadingStatsDateTime& localStart,
+                                  const uint32_t seconds) {
   if (!localStart.isValid() || seconds == 0) {
     return;
   }
@@ -381,18 +497,22 @@ void recordReadingSpanIntoHistory(uint32_t& anchorDay, std::array<uint8_t, READI
   ReadingStatsDateTime cursor = localStart;
   uint32_t remaining = seconds;
   while (remaining > 0) {
-    markReadingHistoryDay(anchorDay, bits, readingStatsDayIndex(cursor.date));
+    const uint32_t dayIndex = readingStatsDayIndex(cursor.date);
     const uint32_t secondsUntilMidnight =
         (24u * 3600u) - (static_cast<uint32_t>(cursor.hour) * 3600u + static_cast<uint32_t>(cursor.minute) * 60u +
                          static_cast<uint32_t>(cursor.second));
     const uint32_t segment = remaining < secondsUntilMidnight ? remaining : secondsUntilMidnight;
+    advanceStreakFreeze(anchorDay, bits, freeze, dayIndex);
+    markReadingHistoryDay(anchorDay, bits, dayIndex);
+    accumulateStreakFreeze(anchorDay, bits, freeze, dayIndex, segment);
     remaining -= segment;
     addSecondsToReadingStatsDateTime(cursor, segment);
   }
 }
 
 void mergeReadingHistory(uint32_t& targetAnchorDay, std::array<uint8_t, READING_HISTORY_BYTES>& targetBits,
-                         const uint32_t sourceAnchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& sourceBits) {
+                         ReadingStreakFreeze& targetFreeze, const uint32_t sourceAnchorDay,
+                         const std::array<uint8_t, READING_HISTORY_BYTES>& sourceBits) {
   if (sourceAnchorDay == 0 && !isBitSet(sourceBits, 0)) {
     return;
   }
@@ -402,6 +522,12 @@ void mergeReadingHistory(uint32_t& targetAnchorDay, std::array<uint8_t, READING_
     targetBits = sourceBits;
     return;
   }
+
+  // The target's bridges describe gaps in its own run. Remember where that run
+  // sits so the count can be re-derived once the source's days are merged in.
+  const uint32_t oldAnchorDay = targetAnchorDay;
+  const size_t oldRunStartOffset = bridgedRunStartOffset(targetAnchorDay, targetBits, targetFreeze);
+  const StreakRun oldRun = walkStreakRun(targetBits, oldRunStartOffset, targetFreeze.bridgedDays);
 
   if (sourceAnchorDay > targetAnchorDay) {
     shiftHistoryOlder(targetBits, sourceAnchorDay - targetAnchorDay);
@@ -421,6 +547,34 @@ void mergeReadingHistory(uint32_t& targetAnchorDay, std::array<uint8_t, READING_
       setBit(targetBits, static_cast<size_t>(delta));
     }
   }
+
+  if (targetFreeze.bridgedDays == 0) {
+    return;
+  }
+
+  // Gaps the source filled no longer need a bridge. A missed day newer than the
+  // old run was never restored on this device, so it ends the run and leaves no
+  // bridges to apply. A freeze that is still pending keeps its run as it was.
+  const size_t shift = targetAnchorDay - oldAnchorDay;
+  const size_t runNewestOffset = oldRunStartOffset + shift;
+  const size_t runOldestOffset = oldRun.oldestOffset + shift;
+  uint16_t remainingBridges = 0;
+  for (size_t bitIndex = runNewestOffset; bitIndex < runOldestOffset && bitIndex < READING_HISTORY_DAYS; ++bitIndex) {
+    if (!isBitSet(targetBits, bitIndex)) {
+      remainingBridges++;
+    }
+  }
+  if (isFreezePending(targetAnchorDay, targetBits, targetFreeze)) {
+    targetFreeze.bridgedDays = remainingBridges;
+    return;
+  }
+  for (size_t bitIndex = 0; bitIndex < runNewestOffset && bitIndex < READING_HISTORY_DAYS; ++bitIndex) {
+    if (!isBitSet(targetBits, bitIndex)) {
+      remainingBridges = 0;
+      break;
+    }
+  }
+  targetFreeze.bridgedDays = remainingBridges;
 }
 
 uint16_t computeReadingHistoryLongestStreak(const uint32_t anchorDay,
@@ -444,28 +598,37 @@ uint16_t computeReadingHistoryLongestStreak(const uint32_t anchorDay,
   return best;
 }
 
-uint16_t computeReadingHistoryCurrentStreak(uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits,
-                                            const ReadingStatsDate* today) {
-  if (anchorDay == 0 && !isBitSet(bits, 0)) {
-    return 0;
+ReadingStreakStatus computeReadingStreakStatus(const uint32_t anchorDay,
+                                               const std::array<uint8_t, READING_HISTORY_BYTES>& bits,
+                                               const ReadingStreakFreeze& freeze, const ReadingStatsDate* today) {
+  ReadingStreakStatus status;
+  if (isHistoryEmpty(anchorDay, bits) || !isBitSet(bits, 0)) {
+    return status;
   }
-  if (!isBitSet(bits, 0)) {
-    return 0;
-  }
+
+  const bool freezePending = isFreezePending(anchorDay, bits, freeze);
+  // An unrestored freeze leaves the run starting on the anchor day.
+  const uint16_t settledBridges = freezePending ? 0 : freeze.bridgedDays;
 
   if (today && today->isValid()) {
     const uint32_t todayDay = readingStatsDayIndex(*today);
-    if (anchorDay + 1u < todayDay) {
-      return 0;
+    if (todayDay == anchorDay && freezePending) {
+      status.state = ReadingStreakState::Frozen;
+      status.days = walkStreakRun(bits, 2, freeze.bridgedDays).days;
+      status.freezeSeconds = freeze.freezeSeconds;
+      return status;
+    }
+    if (todayDay > anchorDay + 1u) {
+      // Yesterday was missed and nothing has been read today yet.
+      if (todayDay == anchorDay + 2u && canRestoreStreakOn(freeze, todayDay)) {
+        status.state = ReadingStreakState::Frozen;
+        status.days = walkStreakRun(bits, 0, settledBridges).days;
+      }
+      return status;
     }
   }
 
-  uint16_t streak = 0;
-  for (size_t bitIndex = 0; bitIndex < READING_HISTORY_DAYS; ++bitIndex) {
-    if (!isBitSet(bits, bitIndex)) {
-      break;
-    }
-    streak++;
-  }
-  return streak;
+  status.state = ReadingStreakState::Active;
+  status.days = walkStreakRun(bits, 0, settledBridges).days;
+  return status;
 }

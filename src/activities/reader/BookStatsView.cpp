@@ -16,6 +16,8 @@
 #include "components/TouchRegistry.h"
 #include "components/UITheme.h"
 #include "components/icons/listIcons.h"
+#include "components/icons/streak.h"
+#include "components/icons/streakIcons.h"
 #include "fontIds.h"
 
 namespace {
@@ -239,6 +241,22 @@ void drawStatCell(const GfxRenderer& renderer, const int x, const int w, const i
   drawCenteredLabel(renderer, SMALL_FONT_ID, x, w, textY + valueLineH + 4, label);
 }
 
+// Stat cell whose value is preceded by an icon, centered as one block.
+void drawIconStatCell(const GfxRenderer& renderer, const int x, const int w, const int y, const int h,
+                      const uint8_t* icon, const char* value, const char* label) {
+  constexpr int iconSize = 24;
+  constexpr int iconTextGap = 6;
+  const int valueLineH = renderer.getLineHeight(UI_12_FONT_ID);
+  const int labelLineH = renderer.getLineHeight(SMALL_FONT_ID);
+  const int totalTextH = valueLineH + 4 + labelLineH;
+  const int textY = y + (h - totalTextH) / 2;
+  const int valueW = renderer.getTextWidth(UI_12_FONT_ID, value, EpdFontFamily::BOLD);
+  const int blockX = x + (w - (iconSize + iconTextGap + valueW)) / 2;
+  renderer.drawIcon(icon, blockX, textY + (valueLineH - iconSize) / 2, iconSize, iconSize);
+  renderer.drawText(UI_12_FONT_ID, blockX + iconSize + iconTextGap, textY, value, true, EpdFontFamily::BOLD);
+  drawCenteredLabel(renderer, SMALL_FONT_ID, x, w, textY + valueLineH + 4, label);
+}
+
 void drawSectionCard(const GfxRenderer& renderer, const int x, const int y, const int w, const int h, const char* title,
                      const StatsLayout& layout) {
   renderer.drawRect(x, y, w, h);
@@ -417,14 +435,27 @@ void drawGlobalStatsCard(GfxRenderer& renderer, const int x, const int y, const 
   if (showRtcStats) {
     ReadingStatsDateTime today;
     const bool hasToday = getCurrentLocalReadingStatsDateTime(today);
-    const uint16_t currentStreak = hasToday ? stats.currentReadingStreak(&today.date) : 0;
-    if (currentStreak > 0) {
-      snprintf(buf, sizeof(buf), "%u %s", static_cast<unsigned>(currentStreak), dayCountText(currentStreak));
-    } else {
-      snprintf(buf, sizeof(buf), "-");
+    const ReadingStreakStatus streak = hasToday ? stats.readingStreakStatus(&today.date) : ReadingStreakStatus{};
+    const int streakY = y + layout.topCardTitleH + rowH;
+    switch (streak.state) {
+      case ReadingStreakState::None:
+        drawStatCell(renderer, x + thirdW, thirdW, streakY, rowH, "-", tr(STR_STATS_READING_STREAK_LBL));
+        break;
+      case ReadingStreakState::Active:
+        snprintf(buf, sizeof(buf), "%u %s", static_cast<unsigned>(streak.days), dayCountText(streak.days));
+        drawIconStatCell(renderer, x + thirdW, thirdW, streakY, rowH, StreakIcon, buf,
+                         tr(STR_STATS_READING_STREAK_LBL));
+        break;
+      case ReadingStreakState::Frozen: {
+        // While frozen, the label row shows progress toward the restore target.
+        char progress[16];
+        snprintf(progress, sizeof(progress), "%u/%um", static_cast<unsigned>(streak.freezeSeconds / 60),
+                 static_cast<unsigned>(READING_STREAK_RESTORE_SECONDS / 60));
+        snprintf(buf, sizeof(buf), "%u %s", static_cast<unsigned>(streak.days), dayCountText(streak.days));
+        drawIconStatCell(renderer, x + thirdW, thirdW, streakY, rowH, icon_streak_frozen_24_bits, buf, progress);
+        break;
+      }
     }
-    drawStatCell(renderer, x + thirdW, thirdW, y + layout.topCardTitleH + rowH, rowH, buf,
-                 tr(STR_STATS_READING_STREAK_LBL));
   }
 
   if (stats.completedBooks > 0) {

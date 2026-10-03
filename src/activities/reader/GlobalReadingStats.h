@@ -16,9 +16,10 @@ struct GlobalReadingStats {
   uint32_t readingHistoryAnchorDay = 0;
   std::array<uint8_t, READING_HISTORY_BYTES> readingHistoryBits{};
   uint16_t longestReadingStreak = 0;
+  ReadingStreakFreeze streakFreeze;
 
-  static constexpr uint8_t CURRENT_FILE_VERSION = 3;
-  static constexpr size_t CURRENT_FILE_SIZE = 159;
+  static constexpr uint8_t CURRENT_FILE_VERSION = 4;
+  static constexpr size_t CURRENT_FILE_SIZE = 171;
   static constexpr size_t MIN_SUPPORTED_FILE_SIZE = 13;
 
   // Loads stats from /.crosspoint/global_stats.bin. Returns default-constructed
@@ -45,6 +46,6 @@ struct GlobalReadingStats {
   static bool resetLocal();
 
   void recordReadingSpan(const ReadingStatsDateTime& localStart, uint32_t seconds);
-  uint16_t currentReadingStreak(const ReadingStatsDate* today) const;
+  ReadingStreakStatus readingStreakStatus(const ReadingStatsDate* today) const;
   uint16_t displayLongestReadingStreak() const;
 };

@@ -42,11 +42,19 @@ struct StatsLoadOutcome {
 //   [61-64]   readingHistoryAnchorDay   uint32_t LE
 //   [65-156]  readingHistoryBits[92]    uint8_t
 //   [157-158] longestReadingStreak      uint16_t LE
+//
+// Binary layout v4 (171 bytes): v3 fields with version (= 4), followed by
+//   [159-160] streakFreeze.bridgedDays     uint16_t LE
+//   [161-164] streakFreeze.lastRestoreDay  uint32_t LE
+//   [165-168] streakFreeze.freezeDay       uint32_t LE
+//   [169-170] streakFreeze.freezeSeconds   uint16_t LE
 static constexpr uint8_t GLOBAL_STATS_VERSION = GlobalReadingStats::CURRENT_FILE_VERSION;
 static constexpr uint8_t GLOBAL_STATS_VERSION_V1 = 1;
 static constexpr int GLOBAL_STATS_FILE_SIZE_V1 = 13;
 static constexpr uint8_t GLOBAL_STATS_VERSION_V2 = 2;
 static constexpr int GLOBAL_STATS_FILE_SIZE_V2 = 17;
+static constexpr uint8_t GLOBAL_STATS_VERSION_V3 = 3;
+static constexpr int GLOBAL_STATS_FILE_SIZE_V3 = 159;
 static constexpr int GLOBAL_STATS_FILE_SIZE = static_cast<int>(GlobalReadingStats::CURRENT_FILE_SIZE);
 static constexpr char GLOBAL_STATS_PATH[] = "/.crosspoint/global_stats.bin";
 static constexpr char GLOBAL_STATS_BAK_PATH[] = "/.crosspoint/global_stats.bin.bak";
@@ -84,9 +92,21 @@ void addStats(GlobalReadingStats& target, const GlobalReadingStats& source) {
   for (size_t i = 0; i < target.dayOfWeekSeconds.size(); ++i) {
     target.dayOfWeekSeconds[i] = addSaturated(target.dayOfWeekSeconds[i], source.dayOfWeekSeconds[i]);
   }
-  mergeReadingHistory(target.readingHistoryAnchorDay, target.readingHistoryBits, source.readingHistoryAnchorDay,
-                      source.readingHistoryBits);
+  mergeReadingHistory(target.readingHistoryAnchorDay, target.readingHistoryBits, target.streakFreeze,
+                      source.readingHistoryAnchorDay, source.readingHistoryBits);
   target.longestReadingStreak = std::max(target.longestReadingStreak, source.longestReadingStreak);
+}
+
+void writeLe16(uint8_t* data, const int offset, const uint16_t value) {
+  data[offset] = value & 0xFF;
+  data[offset + 1] = (value >> 8) & 0xFF;
+}
+
+void writeLe32(uint8_t* data, const int offset, const uint32_t value) {
+  data[offset] = value & 0xFF;
+  data[offset + 1] = (value >> 8) & 0xFF;
+  data[offset + 2] = (value >> 16) & 0xFF;
+  data[offset + 3] = (value >> 24) & 0xFF;
 }
 
 void serializeStats(const GlobalReadingStats& stats, uint8_t* data) {
@@ -130,6 +150,10 @@ void serializeStats(const GlobalReadingStats& stats, uint8_t* data) {
   memcpy(data + 65, stats.readingHistoryBits.data(), stats.readingHistoryBits.size());
   data[157] = stats.longestReadingStreak & 0xFF;
   data[158] = (stats.longestReadingStreak >> 8) & 0xFF;
+  writeLe16(data, 159, stats.streakFreeze.bridgedDays);
+  writeLe32(data, 161, stats.streakFreeze.lastRestoreDay);
+  writeLe32(data, 165, stats.streakFreeze.freezeDay);
+  writeLe16(data, 169, stats.streakFreeze.freezeSeconds);
 }
 
 StatsLoadOutcome loadFromOpenFile(FsFile& f, GlobalReadingStats& out) {
@@ -161,7 +185,9 @@ StatsLoadOutcome loadFromOpenFile(FsFile& f, GlobalReadingStats& out) {
     return outcome;
   }
 
-  if (n != GLOBAL_STATS_FILE_SIZE || data[0] != GLOBAL_STATS_VERSION) return outcome;
+  const bool isV3 = n == GLOBAL_STATS_FILE_SIZE_V3 && data[0] == GLOBAL_STATS_VERSION_V3;
+  const bool isCurrent = n == GLOBAL_STATS_FILE_SIZE && data[0] == GLOBAL_STATS_VERSION;
+  if (!isV3 && !isCurrent) return outcome;
   loadCommonFields(data, out);
   out.completedBooks = readLe32(data, 13);
   for (size_t i = 0; i < out.timeOfDaySeconds.size(); ++i) {
@@ -173,6 +199,12 @@ StatsLoadOutcome loadFromOpenFile(FsFile& f, GlobalReadingStats& out) {
   out.readingHistoryAnchorDay = readLe32(data, 61);
   memcpy(out.readingHistoryBits.data(), data + 65, out.readingHistoryBits.size());
   out.longestReadingStreak = readLe16(data, 157);
+  if (isCurrent) {
+    out.streakFreeze.bridgedDays = readLe16(data, 159);
+    out.streakFreeze.lastRestoreDay = readLe32(data, 161);
+    out.streakFreeze.freezeDay = readLe32(data, 165);
+    out.streakFreeze.freezeSeconds = readLe16(data, 169);
+  }
   outcome.result = StatsLoadResult::Ok;
   return outcome;
 }
@@ -373,16 +405,19 @@ bool GlobalReadingStats::resetLocal() { return saveToFile(GlobalReadingStats{}, 
 
 void GlobalReadingStats::recordReadingSpan(const ReadingStatsDateTime& localStart, const uint32_t seconds) {
   recordReadingSpanIntoBuckets(timeOfDaySeconds, dayOfWeekSeconds, localStart, seconds);
-  recordReadingSpanIntoHistory(readingHistoryAnchorDay, readingHistoryBits, localStart, seconds);
+  recordReadingSpanIntoHistory(readingHistoryAnchorDay, readingHistoryBits, streakFreeze, localStart, seconds);
 
-  const uint16_t historyLongest = computeReadingHistoryLongestStreak(readingHistoryAnchorDay, readingHistoryBits);
+  // A restored streak can be longer than any unbroken run in the history bitmap.
+  const uint16_t historyLongest =
+      std::max(computeReadingHistoryLongestStreak(readingHistoryAnchorDay, readingHistoryBits),
+               readingStreakStatus(nullptr).days);
   if (historyLongest > longestReadingStreak) {
     longestReadingStreak = historyLongest;
   }
 }
 
-uint16_t GlobalReadingStats::currentReadingStreak(const ReadingStatsDate* today) const {
-  return computeReadingHistoryCurrentStreak(readingHistoryAnchorDay, readingHistoryBits, today);
+ReadingStreakStatus GlobalReadingStats::readingStreakStatus(const ReadingStatsDate* today) const {
+  return computeReadingStreakStatus(readingHistoryAnchorDay, readingHistoryBits, streakFreeze, today);
 }
 
 uint16_t GlobalReadingStats::displayLongestReadingStreak() const {

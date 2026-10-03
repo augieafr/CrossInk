@@ -1,3 +1,13 @@
+## [Unreleased]
+
+### Added
+
+- Streak freeze: after one missed day the reading streak is frozen instead of lost, and reading 2 hours that day restores it. The missed day does not add to the streak, and a restore is available once every 7 days. Home, sleep, and Reading Stats screens show a snowflake and the restore progress while the streak is frozen.
+
+### Changed
+
+- All-time reading stats use a new file version to store streak freeze progress. Sync Stats needs this firmware or newer on both readers; stats from older firmware are still read.
+
 ## [v1.6.1] - 2026-09-30
 
 ### Added

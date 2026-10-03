@@ -18,6 +18,8 @@ Nearby Stats Sync shares only each reader's all-time counters:
 
 It does not sync per-book reading position, bookmarks, recent books, files, KOReader progress, settings, WiFi passwords, or OPDS servers.
 
+Reading days are combined across readers for streaks, but streak freeze progress and restores stay on the reader that earned them. Both readers need firmware with the same or newer stats file version; a reader on older firmware rejects stats sent by a newer one.
+
 Each device owns one record, and the Reading Stats screen sums all the records it can read. The device does not merge another reader's totals into its local `global_stats.bin`.
 
 ## How Nearby Sync Works
